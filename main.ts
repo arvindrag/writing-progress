@@ -11,8 +11,9 @@ import {
 class FolderWordRateSettings {
     folderPath: string = "Novel/Chapters"             // e.g., "Writing" or "Projects/Book"
     breakPoints: Map<string, number[]> = new Map()
-    toObject(){
-        return {"folderPath": this.folderPath,
+    toObject() {
+        return {
+            "folderPath": this.folderPath,
             "breakPoints": [...this.breakPoints]
         }
     }
@@ -22,6 +23,7 @@ interface ChapterStats {
     wc: number
     ctime: number
     mtime: number
+    ischapter: boolean
 }
 
 type aggregation = ((wcmap: Map<string, ChapterStats>, root: string) => number)
@@ -32,11 +34,6 @@ interface Metric {
 }
 
 const METRICS: Metric[] = [
-    {
-        label: "Book Length",
-        name: "total_wc",
-        calculate: (wcmap, root) => (wcmap.get(root)?.wc ?? 0)
-    },
     {
         label: "Chapter Length",
         name: "latest_chapter_wc",
@@ -52,7 +49,16 @@ const METRICS: Metric[] = [
             return latest_chapter_wc
         },
     },
-
+    {
+        label: "Chapters",
+        name: "num_chapters",
+        calculate: (wcmap, root) => (([...wcmap.values()].filter(c=>c.ischapter)).length)
+    },
+    {
+        label: "Book Length",
+        name: "total_wc",
+        calculate: (wcmap, root) => (wcmap.get(root)?.wc ?? 0)
+    },
 ];
 
 
@@ -116,7 +122,7 @@ export default class FolderWordRatePlugin extends Plugin {
     }
 
     private async computeStats(item: TAbstractFile, wcmap: Map<string, ChapterStats>, abortSignal?: AbortSignal): Promise<ChapterStats> {
-        const stats: ChapterStats = { wc: 0, ctime: 0, mtime: 0 }
+        const stats: ChapterStats = { wc: 0, ctime: 0, mtime: 0, ischapter: false }
         if (abortSignal?.aborted) throw new DOMException("Aborted", "AbortError");
         if (item instanceof TFolder) {
             for (const c of item?.children) {
@@ -135,6 +141,7 @@ export default class FolderWordRatePlugin extends Plugin {
             item.stat.mtime
             try {
                 const content = await this.app.vault.cachedRead(item);
+                stats.ischapter = true
                 stats.wc = countWords(content);
                 stats.ctime = item.stat.ctime
                 stats.mtime = item.stat.mtime
@@ -189,7 +196,7 @@ export default class FolderWordRatePlugin extends Plugin {
         bar.min = 0;
         bar.max = max;
         bar.value = value;
-        this.addElement(meter, "p", `${value}/${max}`)
+        this.addElement(meter, "p", `${formatCompact(value)}/${formatCompact(max)}`)
     }
     private renderMeters(stats: Map<string, number>) {
         document.querySelectorAll(".fwr-meters").forEach((el) => el.detach());
@@ -203,10 +210,9 @@ export default class FolderWordRatePlugin extends Plugin {
             const value = stats.get(metric.name) ?? 0
             const bp = (
                 (this.settings.breakPoints.get(metric.name) ?? [100]
-                ).filter(b => b >= value).sort()
+                ).filter(b => b >= value)
             )
-            this.renderMeter(meters, metric.label, value, bp[0] ?? 100)
-            // this.renderMeter(meters, metric.label, value, 100)
+            this.renderMeter(meters, metric.label, value, Math.min(...bp) ?? 100)
         }
     }
 
@@ -242,7 +248,7 @@ export default class FolderWordRatePlugin extends Plugin {
         // create new one
         const badge = document.createElement("span");
         badge.classList.add("fwr-badge");
-        const text = `${formatNumber(totalWords)} words`;
+        const text = `${totalWords} words`;
         badge.textContent = text;
         titleEl.appendChild(badge);
     }
@@ -254,11 +260,11 @@ export default class FolderWordRatePlugin extends Plugin {
 
     async loadSettings() {
         const data = await this.loadData();
-        if(!data) return
-        if (data.folderPath!==null){
+        if (!data) return
+        if (data.folderPath !== null) {
             this.settings.folderPath = data.folderPath
         }
-        if (data.breakPoints!==null){
+        if (data.breakPoints !== null) {
             this.settings.breakPoints = new Map(data.breakPoints)
         }
     }
@@ -277,27 +283,6 @@ class FolderWordRateSettingTab extends PluginSettingTab {
     constructor(app: App, plugin: FolderWordRatePlugin) {
         super(app, plugin);
         this.plugin = plugin;
-    }
-
-    private addSetting(parent: HTMLElement,
-        name: string,
-        desc: string,
-        placeholder: string,
-        setting: any
-    ) {
-        new Setting(parent)
-            .setName(name)
-            .setDesc(desc)
-            .addText((t) =>
-                t
-                    .setPlaceholder(placeholder)
-                    .setValue(setting)
-                    .onChange(async (v) => {
-                        setting = v.trim();
-                        await this.plugin.saveSettings();
-                    })
-            );
-
     }
 
     display(): void {
@@ -323,14 +308,17 @@ class FolderWordRateSettingTab extends PluginSettingTab {
             new Setting(containerEl)
                 .setName(metric.label)
                 .setDesc(`Breakpoints for ${metric.label}`)
-                .addText((t) =>
-                    t
-                        .setPlaceholder("100, 1000")
-                        .setValue(this.plugin.settings.breakPoints.get(metric.name)?.join(", ") ?? "100,1000")
+                .addText((t) => {
+                    const values = this.plugin.settings.breakPoints.get(metric.name)?.map(
+                        v => formatCompact(v))?.join(", ");
+                    t.setPlaceholder("100, 1K")
+                        .setValue(values ?? "100,1K")
                         .onChange(async (v) => {
-                            this.plugin.settings.breakPoints.set(metric.name, v.trim().split(",").map(b => parseInt(b.trim()) ?? 0))
+                            const prsd = v.trim().split(",").map(b => parseCompact(b.trim()))
+                            this.plugin.settings.breakPoints.set(metric.name, prsd ?? 0)
                             await this.plugin.saveSettings();
                         })
+                }
                 );
         }
 
@@ -357,11 +345,26 @@ function countWords(s: string): number {
     const tokens = s.match(/\b[^\s\W_][\w'-]*\b/gu);
     return tokens ? tokens.length : 0;
 }
+function formatCompact(num: number, locale: string = "en-US"): string {
+    return new Intl.NumberFormat(locale, {
+        notation: "compact",
+        compactDisplay: "short",
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2, // allows 1.2K
+    }).format(num);
+}
+function parseCompact(str: string): number {
+    const multipliers: Record<string, number> = {
+        k: 1e3,
+        m: 1e6,
+        b: 1e9,
+        t: 1e12,
+    };
+    const match = str.trim().toLowerCase().match(/^([\d,.]+)([kmbt])?$/);
+    if (!match) return Number(str);
 
-function formatNumber(n: number): string {
-    try {
-        return new Intl.NumberFormat().format(n);
-    } catch {
-        return String(n);
-    }
+    const value = parseFloat(match[1].replace(/,/g, ""));
+    const suffix = match[2];
+
+    return suffix ? value * multipliers[suffix] : value;
 }

@@ -40,17 +40,13 @@ class FolderWordRateSettings {
         this.breakPoints = new Map();
     }
     toObject() {
-        return { "folderPath": this.folderPath,
+        return {
+            "folderPath": this.folderPath,
             "breakPoints": [...this.breakPoints]
         };
     }
 }
 const METRICS = [
-    {
-        label: "Book Length",
-        name: "total_wc",
-        calculate: (wcmap, root) => { var _a, _b; return ((_b = (_a = wcmap.get(root)) === null || _a === void 0 ? void 0 : _a.wc) !== null && _b !== void 0 ? _b : 0); }
-    },
     {
         label: "Chapter Length",
         name: "latest_chapter_wc",
@@ -65,6 +61,16 @@ const METRICS = [
             }
             return latest_chapter_wc;
         },
+    },
+    {
+        label: "Chapters",
+        name: "num_chapters",
+        calculate: (wcmap, root) => (([...wcmap.values()].filter(c => c.ischapter)).length)
+    },
+    {
+        label: "Book Length",
+        name: "total_wc",
+        calculate: (wcmap, root) => { var _a, _b; return ((_b = (_a = wcmap.get(root)) === null || _a === void 0 ? void 0 : _a.wc) !== null && _b !== void 0 ? _b : 0); }
     },
 ];
 class FolderWordRatePlugin extends obsidian.Plugin {
@@ -122,7 +128,7 @@ class FolderWordRatePlugin extends obsidian.Plugin {
     }
     computeStats(item, wcmap, abortSignal) {
         return __awaiter(this, void 0, void 0, function* () {
-            const stats = { wc: 0, ctime: 0, mtime: 0 };
+            const stats = { wc: 0, ctime: 0, mtime: 0, ischapter: false };
             if (abortSignal === null || abortSignal === void 0 ? void 0 : abortSignal.aborted)
                 throw new DOMException("Aborted", "AbortError");
             if (item instanceof obsidian.TFolder) {
@@ -142,6 +148,7 @@ class FolderWordRatePlugin extends obsidian.Plugin {
                 item.stat.mtime;
                 try {
                     const content = yield this.app.vault.cachedRead(item);
+                    stats.ischapter = true;
                     stats.wc = countWords(content);
                     stats.ctime = item.stat.ctime;
                     stats.mtime = item.stat.mtime;
@@ -199,7 +206,7 @@ class FolderWordRatePlugin extends obsidian.Plugin {
         bar.min = 0;
         bar.max = max;
         bar.value = value;
-        this.addElement(meter, "p", `${value}/${max}`);
+        this.addElement(meter, "p", `${formatCompact(value)}/${formatCompact(max)}`);
     }
     renderMeters(stats) {
         var _a, _b, _c;
@@ -213,9 +220,8 @@ class FolderWordRatePlugin extends obsidian.Plugin {
         container.appendChild(meters);
         for (const metric of METRICS) {
             const value = (_a = stats.get(metric.name)) !== null && _a !== void 0 ? _a : 0;
-            const bp = (((_b = this.settings.breakPoints.get(metric.name)) !== null && _b !== void 0 ? _b : [100]).filter(b => b >= value).sort());
-            this.renderMeter(meters, metric.label, value, (_c = bp[0]) !== null && _c !== void 0 ? _c : 100);
-            // this.renderMeter(meters, metric.label, value, 100)
+            const bp = (((_b = this.settings.breakPoints.get(metric.name)) !== null && _b !== void 0 ? _b : [100]).filter(b => b >= value));
+            this.renderMeter(meters, metric.label, value, (_c = Math.min(...bp)) !== null && _c !== void 0 ? _c : 100);
         }
     }
     getFileExplorerContainer() {
@@ -250,7 +256,7 @@ class FolderWordRatePlugin extends obsidian.Plugin {
         // create new one
         const badge = document.createElement("span");
         badge.classList.add("fwr-badge");
-        const text = `${formatNumber(totalWords)} words`;
+        const text = `${totalWords} words`;
         badge.textContent = text;
         titleEl.appendChild(badge);
     }
@@ -284,18 +290,6 @@ class FolderWordRateSettingTab extends obsidian.PluginSettingTab {
         super(app, plugin);
         this.plugin = plugin;
     }
-    addSetting(parent, name, desc, placeholder, setting) {
-        new obsidian.Setting(parent)
-            .setName(name)
-            .setDesc(desc)
-            .addText((t) => t
-            .setPlaceholder(placeholder)
-            .setValue(setting)
-            .onChange((v) => __awaiter(this, void 0, void 0, function* () {
-            setting = v.trim();
-            yield this.plugin.saveSettings();
-        })));
-    }
     display() {
         const { containerEl } = this;
         containerEl.empty();
@@ -317,11 +311,12 @@ class FolderWordRateSettingTab extends obsidian.PluginSettingTab {
                 .setDesc(`Breakpoints for ${metric.label}`)
                 .addText((t) => {
                 var _a, _b;
-                return t
-                    .setPlaceholder("100, 1000")
-                    .setValue((_b = (_a = this.plugin.settings.breakPoints.get(metric.name)) === null || _a === void 0 ? void 0 : _a.join(", ")) !== null && _b !== void 0 ? _b : "100,1000")
+                const values = (_b = (_a = this.plugin.settings.breakPoints.get(metric.name)) === null || _a === void 0 ? void 0 : _a.map(v => formatCompact(v))) === null || _b === void 0 ? void 0 : _b.join(", ");
+                t.setPlaceholder("100, 1K")
+                    .setValue(values !== null && values !== void 0 ? values : "100,1K")
                     .onChange((v) => __awaiter(this, void 0, void 0, function* () {
-                    this.plugin.settings.breakPoints.set(metric.name, v.trim().split(",").map(b => { var _a; return (_a = parseInt(b.trim())) !== null && _a !== void 0 ? _a : 0; }));
+                    const prsd = v.trim().split(",").map(b => parseCompact(b.trim()));
+                    this.plugin.settings.breakPoints.set(metric.name, prsd !== null && prsd !== void 0 ? prsd : 0);
                     yield this.plugin.saveSettings();
                 }));
             });
@@ -346,13 +341,27 @@ function countWords(s) {
     const tokens = s.match(/\b[^\s\W_][\w'-]*\b/gu);
     return tokens ? tokens.length : 0;
 }
-function formatNumber(n) {
-    try {
-        return new Intl.NumberFormat().format(n);
-    }
-    catch (_a) {
-        return String(n);
-    }
+function formatCompact(num, locale = "en-US") {
+    return new Intl.NumberFormat(locale, {
+        notation: "compact",
+        compactDisplay: "short",
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2, // allows 1.2K
+    }).format(num);
+}
+function parseCompact(str) {
+    const multipliers = {
+        k: 1e3,
+        m: 1e6,
+        b: 1e9,
+        t: 1e12,
+    };
+    const match = str.trim().toLowerCase().match(/^([\d,.]+)([kmbt])?$/);
+    if (!match)
+        return Number(str);
+    const value = parseFloat(match[1].replace(/,/g, ""));
+    const suffix = match[2];
+    return suffix ? value * multipliers[suffix] : value;
 }
 
 module.exports = FolderWordRatePlugin;
