@@ -1,0 +1,10 @@
+{
+  "id": "word-debt",
+  "name": "Word Debt",
+  "version": "0.0.1",
+  "minAppVersion": "1.4.0",
+  "description": "Displays your debt",
+  "author": "arvind",
+  "authorUrl": "https://example.com",
+  "isDesktopOnly": false
+}
