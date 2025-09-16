@@ -34,20 +34,43 @@ typeof SuppressedError === "function" ? SuppressedError : function (error, suppr
     return e.name = "SuppressedError", e.error = error, e.suppressed = suppressed, e;
 };
 
-const DEFAULT_SETTINGS = {
-    folderPath: "Novel/Chapters",
-    startDateISO: "2025-01-01",
-    includeExtensions: "md,txt",
-    decimals: 1,
-    refreshMs: 30000,
-    showWordCount: false,
-    badgePrefix: "⚡",
-    badgeSuffix: " w/d"
-};
+class FolderWordRateSettings {
+    constructor() {
+        this.folderPath = "Novel/Chapters"; // e.g., "Writing" or "Projects/Book"
+        this.breakPoints = new Map();
+    }
+    toObject() {
+        return { "folderPath": this.folderPath,
+            "breakPoints": [...this.breakPoints]
+        };
+    }
+}
+const METRICS = [
+    {
+        label: "Book Length",
+        name: "total_wc",
+        calculate: (wcmap, root) => { var _a, _b; return ((_b = (_a = wcmap.get(root)) === null || _a === void 0 ? void 0 : _a.wc) !== null && _b !== void 0 ? _b : 0); }
+    },
+    {
+        label: "Chapter Length",
+        name: "latest_chapter_wc",
+        calculate: (wcmap, root) => {
+            let latest_chapter_wc = 0;
+            let maxMtime = -Infinity;
+            for (const stats of wcmap.values()) {
+                if (stats.mtime > maxMtime) {
+                    maxMtime = stats.mtime;
+                    latest_chapter_wc = stats.wc;
+                }
+            }
+            return latest_chapter_wc;
+        },
+    },
+];
 class FolderWordRatePlugin extends obsidian.Plugin {
     constructor() {
         super(...arguments);
-        this.settings = DEFAULT_SETTINGS;
+        this.settings = new FolderWordRateSettings();
     }
     onload() {
         return __awaiter(this, void 0, void 0, function* () {
@@ -80,53 +103,66 @@ class FolderWordRatePlugin extends obsidian.Plugin {
         this.registerEvent(this.app.workspace.on("file-open", retrigger));
         this.registerEvent(this.app.workspace.on("layout-change", retrigger));
     }
-    isEligibleFile(file) {
-        var _a, _b;
-        const exts = this.settings.includeExtensions
-            .split(",")
-            .map(s => s.trim().toLowerCase())
-            .filter(Boolean);
-        const fileExt = (_b = (_a = file.extension) === null || _a === void 0 ? void 0 : _a.toLowerCase()) !== null && _b !== void 0 ? _b : "";
-        return exts.length === 0 || exts.includes(fileExt);
-    }
-    computeWordStats(item, wcmap, stats, abortSignal) {
+    // private isEligibleFile(file: TFile): boolean {
+    //     const exts = this.settings.includeExtensions
+    //         .split(",")
+    //         .map(s => s.trim().toLowerCase())
+    //         .filter(Boolean);
+    //     const fileExt = file.extension?.toLowerCase() ?? "";
+    //     return exts.length === 0 || exts.includes(fileExt);
+    // }
+    aggregateStats(wcmap, abortSignal) {
         return __awaiter(this, void 0, void 0, function* () {
-            let wc = 0;
+            const aggregateStats = new Map();
+            for (const metric of METRICS) {
+                aggregateStats.set(metric.name, metric.calculate(wcmap, this.settings.folderPath));
+            }
+            return aggregateStats;
+        });
+    }
+    computeStats(item, wcmap, abortSignal) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const stats = { wc: 0, ctime: 0, mtime: 0 };
             if (abortSignal === null || abortSignal === void 0 ? void 0 : abortSignal.aborted)
                 throw new DOMException("Aborted", "AbortError");
             if (item instanceof obsidian.TFolder) {
                 for (const c of item === null || item === void 0 ? void 0 : item.children) {
-                    wc += yield this.computeWordStats(c, wcmap, stats, abortSignal);
+                    const cstats = yield this.computeStats(c, wcmap, abortSignal);
+                    stats.wc += cstats.wc;
+                    if (stats.ctime == 0 || stats.ctime > cstats.ctime) {
+                        stats.ctime = cstats.ctime;
+                    }
+                    if (stats.mtime == 0 || stats.mtime < cstats.mtime) {
+                        stats.mtime = cstats.mtime;
+                    }
                 }
-                wcmap.set(item.path, wc);
-                console.log(item);
+                wcmap.set(item.path, stats);
             }
             if (item instanceof obsidian.TFile) {
                 item.stat.mtime;
-                if (this.isEligibleFile(item)) {
-                    try {
-                        const content = yield this.app.vault.cachedRead(item);
-                        wc = countWords(content);
-                        wcmap.set(item.path, wc);
-                    }
-                    catch (_) {
-                        // Ignore unreadable files
-                    }
+                try {
+                    const content = yield this.app.vault.cachedRead(item);
+                    stats.wc = countWords(content);
+                    stats.ctime = item.stat.ctime;
+                    stats.mtime = item.stat.mtime;
+                    wcmap.set(item.path, stats);
+                }
+                catch (_) {
+                    // Ignore unreadable files
                 }
             }
-            return wc;
+            return stats;
         });
     }
     computeDaysSinceStart() {
-        const start = new Date(this.settings.startDateISO);
-        if (isNaN(start.getTime()))
-            return 0;
-        const now = new Date();
-        const ms = now.getTime() - start.getTime();
-        if (ms <= 0)
-            return 0;
-        // Use exact day fraction to avoid jumpiness and division by zero
-        return ms / (1000 * 60 * 60 * 24);
+        // const start = new Date(this.settings.startDateISO);
+        // if (isNaN(start.getTime())) return 0;
+        // const now = new Date();
+        // const ms = now.getTime() - start.getTime();
+        // if (ms <= 0) return 0;
+        // // Use exact day fraction to avoid jumpiness and division by zero
+        // return ms / (1000 * 60 * 60 * 24);
+        return 0;
     }
     safeComputeAndRender() {
         return __awaiter(this, void 0, void 0, function* () {
@@ -135,18 +171,18 @@ class FolderWordRatePlugin extends obsidian.Plugin {
             const controller = new AbortController();
             this.lastComputeAbort = controller;
             let wcmap = new Map();
-            let stats = new Map();
             const root = this.app.vault.getFolderByPath(this.settings.folderPath);
             if (root === null) {
                 console.log("Failed to find root file: ", this.settings.folderPath);
                 return;
             }
-            const [total, days] = yield Promise.all([
-                this.computeWordStats(root, wcmap, stats, controller.signal),
+            yield Promise.all([
+                this.computeStats(root, wcmap, controller.signal),
                 Promise.resolve(this.computeDaysSinceStart())
             ]);
+            const stats = yield this.aggregateStats(wcmap, controller.signal);
             this.renderBadges(wcmap);
-            this.renderMeters();
+            this.renderMeters(stats);
         });
     }
     addElement(parent, elemtype, text) {
@@ -165,7 +201,8 @@ class FolderWordRatePlugin extends obsidian.Plugin {
         bar.value = value;
         this.addElement(meter, "p", `${value}/${max}`);
     }
-    renderMeters() {
+    renderMeters(stats) {
+        var _a, _b, _c;
         document.querySelectorAll(".fwr-meters").forEach((el) => el.detach());
         const container = this.getFileExplorerContainer();
         if (!container)
@@ -174,8 +211,12 @@ class FolderWordRatePlugin extends obsidian.Plugin {
         meters.classList.add("fwr-meters");
         meters.textContent = "Progress";
         container.appendChild(meters);
-        this.renderMeter(meters, "Book Length", 75, 100);
-        this.renderMeter(meters, "Chapter Length", 75, 200);
+        for (const metric of METRICS) {
+            const value = (_a = stats.get(metric.name)) !== null && _a !== void 0 ? _a : 0;
+            const bp = (((_b = this.settings.breakPoints.get(metric.name)) !== null && _b !== void 0 ? _b : [100]).filter(b => b >= value).sort());
+            this.renderMeter(meters, metric.label, value, (_c = bp[0]) !== null && _c !== void 0 ? _c : 100);
+            // this.renderMeter(meters, metric.label, value, 100)
+        }
     }
     getFileExplorerContainer() {
         var _a;
@@ -192,11 +233,11 @@ class FolderWordRatePlugin extends obsidian.Plugin {
             return;
         const items = container.querySelectorAll(`.tree-item-self`);
         items.forEach(item => {
-            var _a, _b;
+            var _a, _b, _c;
             const path = (_a = item.dataset) === null || _a === void 0 ? void 0 : _a.path;
             if (path !== undefined) {
                 if (wcmap.has(path)) {
-                    this.renderWCBadge(item, (_b = wcmap.get(path)) !== null && _b !== void 0 ? _b : 0);
+                    this.renderWCBadge(item, (_c = (_b = wcmap.get(path)) === null || _b === void 0 ? void 0 : _b.wc) !== null && _c !== void 0 ? _c : 0);
                 }
             }
         });
@@ -219,13 +260,20 @@ class FolderWordRatePlugin extends obsidian.Plugin {
     }
     loadSettings() {
         return __awaiter(this, void 0, void 0, function* () {
-            this.settings = Object.assign({}, DEFAULT_SETTINGS, yield this.loadData());
+            const data = yield this.loadData();
+            if (!data)
+                return;
+            if (data.folderPath !== null) {
+                this.settings.folderPath = data.folderPath;
+            }
+            if (data.breakPoints !== null) {
+                this.settings.breakPoints = new Map(data.breakPoints);
+            }
         });
     }
     saveSettings() {
         return __awaiter(this, void 0, void 0, function* () {
-            yield this.saveData(this.settings);
-            // this.startPeriodicRefresh();
+            yield this.saveData(this.settings.toObject());
             this.safeComputeAndRender();
         });
     }
@@ -236,90 +284,48 @@ class FolderWordRateSettingTab extends obsidian.PluginSettingTab {
         super(app, plugin);
         this.plugin = plugin;
     }
+    addSetting(parent, name, desc, placeholder, setting) {
+        new obsidian.Setting(parent)
+            .setName(name)
+            .setDesc(desc)
+            .addText((t) => t
+            .setPlaceholder(placeholder)
+            .setValue(setting)
+            .onChange((v) => __awaiter(this, void 0, void 0, function* () {
+            setting = v.trim();
+            yield this.plugin.saveSettings();
+        })));
+    }
     display() {
         const { containerEl } = this;
         containerEl.empty();
         containerEl.createEl("h2", { text: "Folder Word Rate" });
         new obsidian.Setting(containerEl)
-            .setName("Folder path")
+            .setName("Root Folder Path")
             .setDesc("Path in your vault, e.g., \"Writing\" or \"Projects/Book\".")
             .addText((t) => t
-            .setPlaceholder("Writing")
+            .setPlaceholder("Book/Chapters")
             .setValue(this.plugin.settings.folderPath)
             .onChange((v) => __awaiter(this, void 0, void 0, function* () {
             this.plugin.settings.folderPath = v.trim();
             yield this.plugin.saveSettings();
         })));
-        new obsidian.Setting(containerEl)
-            .setName("Start date (ISO)")
-            .setDesc("Words-per-day is measured since this date (YYYY-MM-DD).")
-            .addText((t) => t
-            .setPlaceholder("2025-01-01")
-            .setValue(this.plugin.settings.startDateISO)
-            .onChange((v) => __awaiter(this, void 0, void 0, function* () {
-            this.plugin.settings.startDateISO = v.trim();
-            yield this.plugin.saveSettings();
-        })));
-        new obsidian.Setting(containerEl)
-            .setName("Included file extensions")
-            .setDesc("Comma-separated list, e.g., md,txt")
-            .addText((t) => t
-            .setPlaceholder("md,txt")
-            .setValue(this.plugin.settings.includeExtensions)
-            .onChange((v) => __awaiter(this, void 0, void 0, function* () {
-            this.plugin.settings.includeExtensions = v;
-            yield this.plugin.saveSettings();
-        })));
-        new obsidian.Setting(containerEl)
-            .setName("Decimals")
-            .setDesc("Decimal places for the rate (0–6).")
-            .addSlider((s) => s
-            .setLimits(0, 6, 1)
-            .setValue(this.plugin.settings.decimals)
-            .onChange((v) => __awaiter(this, void 0, void 0, function* () {
-            this.plugin.settings.decimals = v;
-            yield this.plugin.saveSettings();
-        })));
-        new obsidian.Setting(containerEl)
-            .setName("Show total word count")
-            .setDesc("Append total words after the rate.")
-            .addToggle((t) => t
-            .setValue(this.plugin.settings.showWordCount)
-            .onChange((v) => __awaiter(this, void 0, void 0, function* () {
-            this.plugin.settings.showWordCount = v;
-            yield this.plugin.saveSettings();
-        })));
-        new obsidian.Setting(containerEl)
-            .setName("Badge prefix")
-            .setDesc("Text before the number (e.g., ⚡).")
-            .addText((t) => t
-            .setPlaceholder("⚡")
-            .setValue(this.plugin.settings.badgePrefix)
-            .onChange((v) => __awaiter(this, void 0, void 0, function* () {
-            this.plugin.settings.badgePrefix = v;
-            yield this.plugin.saveSettings();
-        })));
-        new obsidian.Setting(containerEl)
-            .setName("Badge suffix")
-            .setDesc("Text after the number (e.g., \" w/d\").")
-            .addText((t) => t
-            .setPlaceholder(" w/d")
-            .setValue(this.plugin.settings.badgeSuffix)
-            .onChange((v) => __awaiter(this, void 0, void 0, function* () {
-            this.plugin.settings.badgeSuffix = v;
-            yield this.plugin.saveSettings();
-        })));
-        new obsidian.Setting(containerEl)
-            .setName("Refresh interval (ms)")
-            .setDesc("How often to recalc automatically. Set 0 to disable.")
-            .addText((t) => t
-            .setPlaceholder("30000")
-            .setValue(String(this.plugin.settings.refreshMs))
-            .onChange((v) => __awaiter(this, void 0, void 0, function* () {
-            const n = Number(v);
-            this.plugin.settings.refreshMs = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 30000;
-            yield this.plugin.saveSettings();
-        })));
+        containerEl.createEl("h2", { text: "Breakpoints:" });
+        for (const metric of METRICS) {
+            new obsidian.Setting(containerEl)
+                .setName(metric.label)
+                .setDesc(`Breakpoints for ${metric.label}`)
+                .addText((t) => {
+                var _a, _b;
+                return t
+                    .setPlaceholder("100, 1000")
+                    .setValue((_b = (_a = this.plugin.settings.breakPoints.get(metric.name)) === null || _a === void 0 ? void 0 : _a.join(", ")) !== null && _b !== void 0 ? _b : "100,1000")
+                    .onChange((v) => __awaiter(this, void 0, void 0, function* () {
+                    this.plugin.settings.breakPoints.set(metric.name, v.trim().split(",").map(b => { var _a; return (_a = parseInt(b.trim())) !== null && _a !== void 0 ? _a : 0; }));
+                    yield this.plugin.saveSettings();
+                }));
+            });
+        }
     }
 }
 /* ---------- Helpers ---------- */

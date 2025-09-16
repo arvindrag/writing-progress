@@ -8,30 +8,57 @@ import {
     TFolder
 } from "obsidian";
 
-interface FolderWordRateSettings {
-    folderPath: string;             // e.g., "Writing" or "Projects/Book"
-    startDateISO: string;           // e.g., "2025-01-01"
-    includeExtensions: string;      // comma-separated extensions: "md,txt"
-    decimals: number;               // number of decimals for rate display
-    refreshMs: number;              // periodic refresh (ms)
-    showWordCount: boolean;         // optionally show total words too
-    badgePrefix: string;            // text before the number, e.g., "⚡"
-    badgeSuffix: string;            // text after the number, e.g., " w/d"
+class FolderWordRateSettings {
+    folderPath: string = "Novel/Chapters"             // e.g., "Writing" or "Projects/Book"
+    breakPoints: Map<string, number[]> = new Map()
+    toObject(){
+        return {"folderPath": this.folderPath,
+            "breakPoints": [...this.breakPoints]
+        }
+    }
 }
 
-const DEFAULT_SETTINGS: FolderWordRateSettings = {
-    folderPath: "Novel/Chapters",
-    startDateISO: "2025-01-01",
-    includeExtensions: "md,txt",
-    decimals: 1,
-    refreshMs: 30000,
-    showWordCount: false,
-    badgePrefix: "⚡",
-    badgeSuffix: " w/d"
-};
+interface ChapterStats {
+    wc: number
+    ctime: number
+    mtime: number
+}
+
+type aggregation = ((wcmap: Map<string, ChapterStats>, root: string) => number)
+interface Metric {
+    label: string
+    name: string
+    calculate: aggregation
+}
+
+const METRICS: Metric[] = [
+    {
+        label: "Book Length",
+        name: "total_wc",
+        calculate: (wcmap, root) => (wcmap.get(root)?.wc ?? 0)
+    },
+    {
+        label: "Chapter Length",
+        name: "latest_chapter_wc",
+        calculate: (wcmap, root) => {
+            let latest_chapter_wc: number = 0;
+            let maxMtime = -Infinity;
+            for (const stats of wcmap.values()) {
+                if (stats.mtime > maxMtime) {
+                    maxMtime = stats.mtime;
+                    latest_chapter_wc = stats.wc;
+                }
+            }
+            return latest_chapter_wc
+        },
+    },
+
+];
+
+
 
 export default class FolderWordRatePlugin extends Plugin {
-    settings: FolderWordRateSettings = DEFAULT_SETTINGS;
+    settings = new FolderWordRateSettings();
     private lastComputeAbort?: AbortController;
 
     async onload() {
@@ -70,70 +97,83 @@ export default class FolderWordRatePlugin extends Plugin {
         this.registerEvent(this.app.workspace.on("layout-change", retrigger));
     }
 
-    private isEligibleFile(file: TFile): boolean {
-        const exts = this.settings.includeExtensions
-            .split(",")
-            .map(s => s.trim().toLowerCase())
-            .filter(Boolean);
+    // private isEligibleFile(file: TFile): boolean {
+    //     const exts = this.settings.includeExtensions
+    //         .split(",")
+    //         .map(s => s.trim().toLowerCase())
+    //         .filter(Boolean);
 
-        const fileExt = file.extension?.toLowerCase() ?? "";
-        return exts.length === 0 || exts.includes(fileExt);
+    //     const fileExt = file.extension?.toLowerCase() ?? "";
+    //     return exts.length === 0 || exts.includes(fileExt);
+    // }
+
+    private async aggregateStats(wcmap: Map<string, ChapterStats>, abortSignal?: AbortSignal) {
+        const aggregateStats = new Map<string, number>();
+        for (const metric of METRICS) {
+            aggregateStats.set(metric.name, metric.calculate(wcmap, this.settings.folderPath))
+        }
+        return aggregateStats
     }
 
-    private async computeWordStats(item: TAbstractFile, wcmap: Map<string, number>,
-        stats: Map<string, string>,
-        abortSignal?: AbortSignal): Promise<number> {
-        let wc = 0
+    private async computeStats(item: TAbstractFile, wcmap: Map<string, ChapterStats>, abortSignal?: AbortSignal): Promise<ChapterStats> {
+        const stats: ChapterStats = { wc: 0, ctime: 0, mtime: 0 }
         if (abortSignal?.aborted) throw new DOMException("Aborted", "AbortError");
         if (item instanceof TFolder) {
             for (const c of item?.children) {
-                wc += await this.computeWordStats(c, wcmap, stats, abortSignal)
+                const cstats = await this.computeStats(c, wcmap, abortSignal)
+                stats.wc += cstats.wc
+                if (stats.ctime == 0 || stats.ctime > cstats.ctime) {
+                    stats.ctime = cstats.ctime
+                }
+                if (stats.mtime == 0 || stats.mtime < cstats.mtime) {
+                    stats.mtime = cstats.mtime
+                }
             }
-            wcmap.set(item.path, wc)
-            console.log(item)
+            wcmap.set(item.path, stats)
         }
         if (item instanceof TFile) {
             item.stat.mtime
-            if (this.isEligibleFile(item)) {
-                try {
-                    const content = await this.app.vault.cachedRead(item);
-                    wc = countWords(content);
-                    wcmap.set(item.path, wc)
-                } catch (_) {
-                    // Ignore unreadable files
-                }
+            try {
+                const content = await this.app.vault.cachedRead(item);
+                stats.wc = countWords(content);
+                stats.ctime = item.stat.ctime
+                stats.mtime = item.stat.mtime
+                wcmap.set(item.path, stats)
+            } catch (_) {
+                // Ignore unreadable files
             }
         }
-        return wc;
+        return stats;
     }
 
     private computeDaysSinceStart(): number {
-        const start = new Date(this.settings.startDateISO);
-        if (isNaN(start.getTime())) return 0;
-        const now = new Date();
-        const ms = now.getTime() - start.getTime();
-        if (ms <= 0) return 0;
-        // Use exact day fraction to avoid jumpiness and division by zero
-        return ms / (1000 * 60 * 60 * 24);
+        // const start = new Date(this.settings.startDateISO);
+        // if (isNaN(start.getTime())) return 0;
+        // const now = new Date();
+        // const ms = now.getTime() - start.getTime();
+        // if (ms <= 0) return 0;
+        // // Use exact day fraction to avoid jumpiness and division by zero
+        // return ms / (1000 * 60 * 60 * 24);
+        return 0
     }
 
     private async safeComputeAndRender() {
         this.lastComputeAbort?.abort();
         const controller = new AbortController();
         this.lastComputeAbort = controller;
-        let wcmap = new Map<string, number>();
-        let stats = new Map<string, string>();
+        let wcmap = new Map<string, ChapterStats>();
         const root = this.app.vault.getFolderByPath(this.settings.folderPath)
         if (root === null) {
             console.log("Failed to find root file: ", this.settings.folderPath)
             return
         }
-        const [total, days] = await Promise.all([
-            this.computeWordStats(root, wcmap, stats, controller.signal),
+        await Promise.all([
+            this.computeStats(root, wcmap, controller.signal),
             Promise.resolve(this.computeDaysSinceStart())
         ]);
+        const stats = await this.aggregateStats(wcmap, controller.signal)
         this.renderBadges(wcmap)
-        this.renderMeters()
+        this.renderMeters(stats)
     }
     private addElement(parent: HTMLElement, elemtype: string, text: string): HTMLElement {
         const elem = document.createElement(elemtype);
@@ -151,7 +191,7 @@ export default class FolderWordRatePlugin extends Plugin {
         bar.value = value;
         this.addElement(meter, "p", `${value}/${max}`)
     }
-    private renderMeters() {
+    private renderMeters(stats: Map<string, number>) {
         document.querySelectorAll(".fwr-meters").forEach((el) => el.detach());
         const container = this.getFileExplorerContainer();
         if (!container) return
@@ -159,8 +199,15 @@ export default class FolderWordRatePlugin extends Plugin {
         meters.classList.add("fwr-meters");
         meters.textContent = "Progress";
         container.appendChild(meters);
-        this.renderMeter(meters, "Book Length", 75, 100)
-        this.renderMeter(meters, "Chapter Length", 75, 200)
+        for (const metric of METRICS) {
+            const value = stats.get(metric.name) ?? 0
+            const bp = (
+                (this.settings.breakPoints.get(metric.name) ?? [100]
+                ).filter(b => b >= value).sort()
+            )
+            this.renderMeter(meters, metric.label, value, bp[0] ?? 100)
+            // this.renderMeter(meters, metric.label, value, 100)
+        }
     }
 
     private getFileExplorerContainer(): HTMLElement | null {
@@ -171,7 +218,7 @@ export default class FolderWordRatePlugin extends Plugin {
         return view?.containerEl ?? null;
     }
 
-    private renderBadges(wcmap: Map<string, number>) {
+    private renderBadges(wcmap: Map<string, ChapterStats>) {
         const container = this.getFileExplorerContainer();
         if (!container) return;
         const items = container.querySelectorAll<HTMLElement>(`.tree-item-self`)
@@ -180,7 +227,7 @@ export default class FolderWordRatePlugin extends Plugin {
                 const path = item.dataset?.path
                 if (path !== undefined) {
                     if (wcmap.has(path)) {
-                        this.renderWCBadge(item as HTMLElement, wcmap.get(path) ?? 0)
+                        this.renderWCBadge(item as HTMLElement, wcmap.get(path)?.wc ?? 0)
                     }
                 }
             }
@@ -206,12 +253,18 @@ export default class FolderWordRatePlugin extends Plugin {
     }
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        const data = await this.loadData();
+        if(!data) return
+        if (data.folderPath!==null){
+            this.settings.folderPath = data.folderPath
+        }
+        if (data.breakPoints!==null){
+            this.settings.breakPoints = new Map(data.breakPoints)
+        }
     }
 
     async saveSettings() {
-        await this.saveData(this.settings);
-        // this.startPeriodicRefresh();
+        await this.saveData(this.settings.toObject());
         this.safeComputeAndRender();
     }
 }
@@ -253,23 +306,34 @@ class FolderWordRateSettingTab extends PluginSettingTab {
 
         containerEl.createEl("h2", { text: "Folder Word Rate" });
 
-        this.addSetting(containerEl,
-            "Folder path",
-            "Path in your vault, e.g., \"Writing\" or \"Projects/Book\".",
-            "Writing",
-            this.plugin.settings.folderPath)
+        new Setting(containerEl)
+            .setName("Root Folder Path")
+            .setDesc("Path in your vault, e.g., \"Writing\" or \"Projects/Book\".",)
+            .addText((t) =>
+                t
+                    .setPlaceholder("Book/Chapters")
+                    .setValue(this.plugin.settings.folderPath)
+                    .onChange(async (v) => {
+                        this.plugin.settings.folderPath = v.trim();
+                        await this.plugin.saveSettings();
+                    })
+            );
+        containerEl.createEl("h2", { text: "Breakpoints:" });
+        for (const metric of METRICS) {
+            new Setting(containerEl)
+                .setName(metric.label)
+                .setDesc(`Breakpoints for ${metric.label}`)
+                .addText((t) =>
+                    t
+                        .setPlaceholder("100, 1000")
+                        .setValue(this.plugin.settings.breakPoints.get(metric.name)?.join(", ") ?? "100,1000")
+                        .onChange(async (v) => {
+                            this.plugin.settings.breakPoints.set(metric.name, v.trim().split(",").map(b => parseInt(b.trim()) ?? 0))
+                            await this.plugin.saveSettings();
+                        })
+                );
+        }
 
-        this.addSetting(containerEl,
-            "Start date (ISO)",
-            "Words-per-day is measured since this date (YYYY-MM-DD).",
-            "2025-01-01",
-            this.plugin.settings.startDateISO)
-
-        this.addSetting(containerEl,
-            "Included file extensions",
-            "Comma-separated list, e.g., md,txt",
-            "md,txt",
-            this.plugin.settings.includeExtensions)
     }
 }
 
@@ -294,21 +358,10 @@ function countWords(s: string): number {
     return tokens ? tokens.length : 0;
 }
 
-function clamp(n: number, min: number, max: number) {
-    return Math.max(min, Math.min(max, n));
-}
-
 function formatNumber(n: number): string {
     try {
         return new Intl.NumberFormat().format(n);
     } catch {
         return String(n);
     }
-}
-
-// CSS.escape polyfill wrapper (Obsidian runs on Electron/Chromium; CSS.escape exists but guard anyway)
-function cssEscape(s: string): string {
-    // @ts-ignore
-    if (typeof CSS !== "undefined" && CSS.escape) return CSS.escape(s);
-    return s.replace(/[^a-zA-Z0-9_\-]/g, (c) => `\\${c}`);
 }
