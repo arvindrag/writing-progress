@@ -108,8 +108,8 @@ export default class FolderWordRatePlugin extends Plugin {
 
         // Manual command
         this.addCommand({
-            id: "recompute-folder-word-rate",
-            name: "Recompute folder word rate",
+            id: "recompute-progress-metrics",
+            name: "Recompute Progress Metrics",
             callback: () => this.safeComputeAndRender()
         });
     }
@@ -132,7 +132,7 @@ export default class FolderWordRatePlugin extends Plugin {
     }
 
     private notify(msg: string) {
-        new Notice(`🥳${msg}🎉`, this.settings.notificationMS)
+        new Notice(msg, this.settings.notificationMS)
         this.alert.play().catch(err => console.error("Sound play failed", err));
     }
 

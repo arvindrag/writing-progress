@@ -119,8 +119,8 @@ class FolderWordRatePlugin extends obsidian.Plugin {
             });
             // Manual command
             this.addCommand({
-                id: "recompute-folder-word-rate",
-                name: "Recompute folder word rate",
+                id: "recompute-progress-metrics",
+                name: "Recompute Progress Metrics",
                 callback: () => this.safeComputeAndRender()
             });
         });
@@ -140,7 +140,7 @@ class FolderWordRatePlugin extends obsidian.Plugin {
         this.registerEvent(this.app.workspace.on("layout-change", retrigger));
     }
     notify(msg) {
-        new obsidian.Notice(`🥳${msg}🎉`, this.settings.notificationMS);
+        new obsidian.Notice(msg, this.settings.notificationMS);
         this.alert.play().catch(err => console.error("Sound play failed", err));
     }
     aggregateStats(wcmap, abortSignal) {
