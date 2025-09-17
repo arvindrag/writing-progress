@@ -5,11 +5,14 @@ import {
     Setting,
     TAbstractFile,
     TFile,
-    TFolder
+    TFolder,
+    Notice
 } from "obsidian";
+import bell from "./assets/bell.mp3";
 
 class FolderWordRateSettings {
-    folderPath: string = "Novel/Chapters"             // e.g., "Writing" or "Projects/Book"
+    folderPath: string = "Novel/Chapters"
+    notificationMS: number = 3000
     breakPoints: Map<string, number[]> = new Map()
     toObject() {
         return {
@@ -18,7 +21,9 @@ class FolderWordRateSettings {
         }
     }
 }
-
+const MS_PER_DAY = 1000.0 * 60 * 60 * 24
+const MS_PER_WEEK = MS_PER_DAY * 7
+let STAT_STATE = new Map<string, number>
 interface ChapterStats {
     wc: number
     ctime: number
@@ -30,13 +35,17 @@ type aggregation = ((wcmap: Map<string, ChapterStats>, root: string) => number)
 interface Metric {
     label: string
     name: string
+    unit: string
+    default: number[]
     calculate: aggregation
 }
 
 const METRICS: Metric[] = [
     {
-        label: "Chapter Length",
+        label: "Chapter",
         name: "latest_chapter_wc",
+        unit: "words",
+        default: [300, 500],
         calculate: (wcmap, root) => {
             let latest_chapter_wc: number = 0;
             let maxMtime = -Infinity;
@@ -50,21 +59,40 @@ const METRICS: Metric[] = [
         },
     },
     {
-        label: "Chapters",
-        name: "num_chapters",
-        calculate: (wcmap, root) => (([...wcmap.values()].filter(c=>c.ischapter)).length)
+        label: "Pace",
+        name: "wc_weekly_pace",
+        unit: "words/week",
+        default: [500, 1000],
+        calculate: (wcmap, root) => {
+            const MS_PER_DAY = 1000 * 60 * 60 * 24;
+            const rootcs = wcmap.get(root);
+            const wc = Number(rootcs?.wc) || 0;
+            let interval = Number(rootcs?.mtime ?? 0) - Number(rootcs?.ctime ?? 0);
+            if (!Number.isFinite(interval) || interval <= 0) interval = MS_PER_DAY; // avoid 0/NaN
+            const pace = Math.round((wc * MS_PER_WEEK) / interval);
+            return Number.isFinite(pace) ? pace : 0; // belt & suspenders
+        }
     },
     {
-        label: "Book Length",
+        label: "Chapters",
+        name: "num_chapters",
+        unit: "chapters",
+        default: [1, 10],
+        calculate: (wcmap, root) => (([...wcmap.values()].filter(c => c.ischapter)).length)
+    },
+    {
+        label: "Words",
         name: "total_wc",
+        unit: "words",
+        default: [1000, 5000],
         calculate: (wcmap, root) => (wcmap.get(root)?.wc ?? 0)
     },
 ];
 
-
-
 export default class FolderWordRatePlugin extends Plugin {
     settings = new FolderWordRateSettings();
+    alert = new Audio(bell)
+
     private lastComputeAbort?: AbortController;
 
     async onload() {
@@ -103,17 +131,13 @@ export default class FolderWordRatePlugin extends Plugin {
         this.registerEvent(this.app.workspace.on("layout-change", retrigger));
     }
 
-    // private isEligibleFile(file: TFile): boolean {
-    //     const exts = this.settings.includeExtensions
-    //         .split(",")
-    //         .map(s => s.trim().toLowerCase())
-    //         .filter(Boolean);
-
-    //     const fileExt = file.extension?.toLowerCase() ?? "";
-    //     return exts.length === 0 || exts.includes(fileExt);
-    // }
+    private notify(msg: string) {
+        new Notice(`🥳${msg}🎉`, this.settings.notificationMS)
+        this.alert.play().catch(err => console.error("Sound play failed", err));
+    }
 
     private async aggregateStats(wcmap: Map<string, ChapterStats>, abortSignal?: AbortSignal) {
+
         const aggregateStats = new Map<string, number>();
         for (const metric of METRICS) {
             aggregateStats.set(metric.name, metric.calculate(wcmap, this.settings.folderPath))
@@ -188,7 +212,7 @@ export default class FolderWordRatePlugin extends Plugin {
         parent.appendChild(elem)
         return elem
     }
-    private renderMeter(meters: HTMLElement, name: string, value: number, max: number) {
+    private renderMeter(meters: HTMLElement, name: string, value: number, max: number, unit: string) {
         const meter = this.addElement(meters, "div", "")
         meter.classList.add("fwr-meter");
         this.addElement(meter, "p", `${name}: `)
@@ -196,7 +220,7 @@ export default class FolderWordRatePlugin extends Plugin {
         bar.min = 0;
         bar.max = max;
         bar.value = value;
-        this.addElement(meter, "p", `${formatCompact(value)}/${formatCompact(max)}`)
+        this.addElement(meter, "p", `${formatCompact(value)}/${formatCompact(max)} ${unit}`)
     }
     private renderMeters(stats: Map<string, number>) {
         document.querySelectorAll(".fwr-meters").forEach((el) => el.detach());
@@ -208,11 +232,17 @@ export default class FolderWordRatePlugin extends Plugin {
         container.appendChild(meters);
         for (const metric of METRICS) {
             const value = stats.get(metric.name) ?? 0
-            const bp = (
-                (this.settings.breakPoints.get(metric.name) ?? [100]
-                ).filter(b => b >= value)
+            const breakpoints = (this.settings.breakPoints.get(metric.name) ?? metric.default)
+            breakpoints.sort((a,b)=>a-b)
+            const limit = (
+                breakpoints.filter(l=>l>=value)[0] ??
+                breakpoints[(breakpoints.length-1)] ?? 0
             )
-            this.renderMeter(meters, metric.label, value, Math.min(...bp) ?? 100)
+            if (value > (STAT_STATE.get(metric.name) ?? Infinity)) {
+                this.notify(`🥳Nice🎉!\n Hit breakpoint on ${metric.label} with ${value}/${STAT_STATE.get(metric.name)}! Good job!`)
+            }
+            STAT_STATE.set(metric.name, limit)
+            this.renderMeter(meters, metric.label, value, limit, metric.unit)
         }
     }
 
@@ -288,12 +318,10 @@ class FolderWordRateSettingTab extends PluginSettingTab {
     display(): void {
         const { containerEl } = this;
         containerEl.empty();
-
         containerEl.createEl("h2", { text: "Folder Word Rate" });
-
         new Setting(containerEl)
             .setName("Root Folder Path")
-            .setDesc("Path in your vault, e.g., \"Writing\" or \"Projects/Book\".",)
+            .setDesc("Path in your vault, e.g. \"Novel/Chapters\".",)
             .addText((t) =>
                 t
                     .setPlaceholder("Book/Chapters")
@@ -303,19 +331,36 @@ class FolderWordRateSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     })
             );
+        new Setting(containerEl)
+            .setName("Notification hover (seconds)")
+            .setDesc("Seconds for notification to hover before disappearing",)
+            .addText((t) =>
+                t
+                    .setPlaceholder("3")
+                    .setValue((this.plugin.settings.notificationMS/1000).toString())
+                    .onChange(async (v) => {
+                        this.plugin.settings.notificationMS = parseFloat(v.trim())*1000;
+                        await this.plugin.saveSettings();
+                    })
+            );            
         containerEl.createEl("h2", { text: "Breakpoints:" });
         for (const metric of METRICS) {
             new Setting(containerEl)
                 .setName(metric.label)
                 .setDesc(`Breakpoints for ${metric.label}`)
                 .addText((t) => {
-                    const values = this.plugin.settings.breakPoints.get(metric.name)?.map(
-                        v => formatCompact(v))?.join(", ");
-                    t.setPlaceholder("100, 1K")
-                        .setValue(values ?? "100,1K")
+                    const breakpoints = (this
+                                        .plugin
+                                        .settings
+                                        .breakPoints
+                                        .get(metric.name))
+                    breakpoints?.sort((a, b) => a - b)
+                                       ;
+                    t.setPlaceholder("0")
+                        .setValue((breakpoints?.map(v => formatCompact(v))?.join(", ")) ?? "0")
                         .onChange(async (v) => {
                             const prsd = v.trim().split(",").map(b => parseCompact(b.trim()))
-                            this.plugin.settings.breakPoints.set(metric.name, prsd ?? 0)
+                            this.plugin.settings.breakPoints.set(metric.name, prsd ?? metric.default)
                             await this.plugin.saveSettings();
                         })
                 }
