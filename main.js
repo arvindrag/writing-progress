@@ -39,6 +39,7 @@ var bell = "data:audio/mpeg;base64,//vQZAAABzxrJw0nAABuKnRSoawAY+IU+rmNgAHUr90rH
 class FolderWordRateSettings {
     constructor() {
         this.folderPath = "Novel/Chapters";
+        this.notify = true;
         this.notificationMS = 3000;
         this.breakPoints = new Map();
     }
@@ -140,8 +141,10 @@ class FolderWordRatePlugin extends obsidian.Plugin {
         this.registerEvent(this.app.workspace.on("layout-change", retrigger));
     }
     notify(msg) {
-        new obsidian.Notice(msg, this.settings.notificationMS);
-        this.alert.play().catch(err => console.error("Sound play failed", err));
+        if (this.settings.notify) {
+            new obsidian.Notice(msg, this.settings.notificationMS);
+            this.alert.play().catch(err => console.error("Sound play failed", err));
+        }
     }
     aggregateStats(wcmap, abortSignal) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -337,6 +340,15 @@ class FolderWordRateSettingTab extends obsidian.PluginSettingTab {
             yield this.plugin.saveSettings();
         })));
         new obsidian.Setting(containerEl)
+            .setName("Notify")
+            .setDesc("Notify me when I hit a breakpoint")
+            .addToggle((t) => t
+            .setValue(this.plugin.settings.notify)
+            .onChange((v) => __awaiter(this, void 0, void 0, function* () {
+            this.plugin.settings.notify = v;
+            yield this.plugin.saveSettings();
+        })));
+        new obsidian.Setting(containerEl)
             .setName("Notification hover (seconds)")
             .setDesc("Seconds for notification to hover before disappearing")
             .addText((t) => t
@@ -350,7 +362,7 @@ class FolderWordRateSettingTab extends obsidian.PluginSettingTab {
         for (const metric of METRICS) {
             new obsidian.Setting(containerEl)
                 .setName(metric.label)
-                .setDesc(`Breakpoints for ${metric.label}`)
+                .setDesc(`Breakpoints for ${metric.label} in (${metric.unit})`)
                 .addText((t) => {
                 var _a, _b;
                 const breakpoints = (this

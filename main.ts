@@ -12,6 +12,7 @@ import bell from "./assets/bell.mp3";
 
 class FolderWordRateSettings {
     folderPath: string = "Novel/Chapters"
+    notify: boolean = true
     notificationMS: number = 3000
     breakPoints: Map<string, number[]> = new Map()
     toObject() {
@@ -132,8 +133,10 @@ export default class FolderWordRatePlugin extends Plugin {
     }
 
     private notify(msg: string) {
-        new Notice(msg, this.settings.notificationMS)
-        this.alert.play().catch(err => console.error("Sound play failed", err));
+        if (this.settings.notify) {
+            new Notice(msg, this.settings.notificationMS)
+            this.alert.play().catch(err => console.error("Sound play failed", err));
+        }
     }
 
     private async aggregateStats(wcmap: Map<string, ChapterStats>, abortSignal?: AbortSignal) {
@@ -233,10 +236,10 @@ export default class FolderWordRatePlugin extends Plugin {
         for (const metric of METRICS) {
             const value = stats.get(metric.name) ?? 0
             const breakpoints = (this.settings.breakPoints.get(metric.name) ?? metric.default)
-            breakpoints.sort((a,b)=>a-b)
+            breakpoints.sort((a, b) => a - b)
             const limit = (
-                breakpoints.filter(l=>l>=value)[0] ??
-                breakpoints[(breakpoints.length-1)] ?? 0
+                breakpoints.filter(l => l >= value)[0] ??
+                breakpoints[(breakpoints.length - 1)] ?? 0
             )
             if (value > (STAT_STATE.get(metric.name) ?? Infinity)) {
                 this.notify(`🥳Nice🎉!\n Hit breakpoint on ${metric.label} with ${value}/${STAT_STATE.get(metric.name)}! Good job!`)
@@ -332,30 +335,41 @@ class FolderWordRateSettingTab extends PluginSettingTab {
                     })
             );
         new Setting(containerEl)
+            .setName("Notify")
+            .setDesc("Notify me when I hit a breakpoint",)
+            .addToggle((t) =>
+                t
+                    .setValue(this.plugin.settings.notify)
+                    .onChange(async (v) => {
+                        this.plugin.settings.notify = v
+                        await this.plugin.saveSettings()
+                    })
+            )
+        new Setting(containerEl)
             .setName("Notification hover (seconds)")
             .setDesc("Seconds for notification to hover before disappearing",)
             .addText((t) =>
                 t
                     .setPlaceholder("3")
-                    .setValue((this.plugin.settings.notificationMS/1000).toString())
+                    .setValue((this.plugin.settings.notificationMS / 1000).toString())
                     .onChange(async (v) => {
-                        this.plugin.settings.notificationMS = parseFloat(v.trim())*1000;
+                        this.plugin.settings.notificationMS = parseFloat(v.trim()) * 1000;
                         await this.plugin.saveSettings();
                     })
-            );            
+            );
         containerEl.createEl("h2", { text: "Breakpoints:" });
         for (const metric of METRICS) {
             new Setting(containerEl)
                 .setName(metric.label)
-                .setDesc(`Breakpoints for ${metric.label}`)
+                .setDesc(`Breakpoints for ${metric.label} in (${metric.unit})`)
                 .addText((t) => {
                     const breakpoints = (this
-                                        .plugin
-                                        .settings
-                                        .breakPoints
-                                        .get(metric.name))
+                        .plugin
+                        .settings
+                        .breakPoints
+                        .get(metric.name))
                     breakpoints?.sort((a, b) => a - b)
-                                       ;
+                        ;
                     t.setPlaceholder("0")
                         .setValue((breakpoints?.map(v => formatCompact(v))?.join(", ")) ?? "0")
                         .onChange(async (v) => {
